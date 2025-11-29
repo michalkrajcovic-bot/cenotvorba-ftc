@@ -1,4 +1,3 @@
-update app with Google Sheets integration
 import streamlit as st
 import datetime
 import gspread
