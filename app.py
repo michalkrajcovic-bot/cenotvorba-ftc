@@ -1,7 +1,7 @@
 import streamlit as st
 import datetime
 import gspread
-from gspread.exceptions import WorksheetNotFound, CellNotFound
+
 
 st.set_page_config(page_title="Cenotvorba nafty", page_icon="⛽", layout="centered")
 
@@ -18,7 +18,7 @@ def get_cennik_worksheet():
     sh = gc.open_by_key(spreadsheet_id)
     try:
         ws = sh.worksheet("cennik")
-    except WorksheetNotFound:
+    except Exception:
         ws = sh.add_worksheet(title="cennik", rows=1000, cols=2)
         ws.update("A1:B1", [["date", "price"]])
     return ws
@@ -54,7 +54,7 @@ def save_price_entry(date, price):
     try:
         cell = ws.find(str_date)
         ws.update_cell(cell.row, 2, float(price))
-    except CellNotFound:
+    except Exception:
         ws.append_row([str_date, float(price)])
 
 
