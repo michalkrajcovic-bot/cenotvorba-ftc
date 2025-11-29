@@ -1,17 +1,65 @@
-
+update app with Google Sheets integration
 import streamlit as st
 import datetime
+import gspread
+from gspread.exceptions import WorksheetNotFound, CellNotFound
 
 st.set_page_config(page_title="Cenotvorba nafty", page_icon="⛽", layout="centered")
 
-# Inicializácia jednoduchého "CRM" a cenníkovej histórie v pamäti
+# Inicializácia jednoduchého "CRM" v pamäti
 if "clients" not in st.session_state:
     st.session_state["clients"] = []
 
-if "price_history" not in st.session_state:
-    st.session_state["price_history"] = []  # zoznam dictov: {"date": date, "price": float}
+# ---------- Google Sheets helpery pre cenníkovú cenu ----------
 
-# Logo (súbor ftc_logo.png musí byť v rovnakom priečinku ako app.py)
+def get_cennik_worksheet():
+    """Vráti worksheet 'cennik' z Google Sheets podľa ID v secrets."""
+    gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
+    spreadsheet_id = st.secrets["pricing"]["spreadsheet_id"]
+    sh = gc.open_by_key(spreadsheet_id)
+    try:
+        ws = sh.worksheet("cennik")
+    except WorksheetNotFound:
+        ws = sh.add_worksheet(title="cennik", rows=1000, cols=2)
+        ws.update("A1:B1", [["date", "price"]])
+    return ws
+
+def load_price_history():
+    """Načíta históriu cenníkových cien z Google Sheets."""
+    ws = get_cennik_worksheet()
+    rows = ws.get_all_records()
+    history = []
+    for r in rows:
+        raw_date = str(r.get("date", "")).strip()
+        raw_price = r.get("price", "")
+        if not raw_date or raw_price == "":
+            continue
+        try:
+            d = datetime.date.fromisoformat(raw_date)
+        except Exception:
+            try:
+                d = datetime.datetime.strptime(raw_date, "%d.%m.%Y").date()
+            except Exception:
+                continue
+        try:
+            price = float(raw_price)
+        except Exception:
+            continue
+        history.append({"date": d, "price": price})
+    return history
+
+def save_price_entry(date, price):
+    """Uloží/aktualizuje cenníkovú cenu k dátumu v Google Sheets."""
+    ws = get_cennik_worksheet()
+    str_date = date.isoformat()
+    try:
+        cell = ws.find(str_date)
+        ws.update_cell(cell.row, 2, float(price))
+    except CellNotFound:
+        ws.append_row([str_date, float(price)])
+
+
+# Logo
 try:
     st.image("ftc_logo.png", width=230)
 except Exception:
@@ -22,25 +70,35 @@ st.title("⛽ Cenotvorba nafty – FTC pricing & mini CRM")
 st.markdown(
     """
 Táto aplikácia:
-- eviduje **klientov** (splatnosť, logistika, zľava z cenníka, kontakty)
-- spravuje **základnú cenníkovú cenu** podľa dátumu
-- podľa zvoleného klienta a zľavy vypočíta jeho **klientsku cenu**
-- spočíta **náklad na klienta** (nákup, logistika, financovanie, factoring) a maržu
+- eviduje **klientov**
+- pracuje s **cenníkovou cenou uloženou v Google Sheets**
+- z cenníka + zľavy spočíta **klientsku cenu**
+- dopočíta **náklady** (nákup, logistika, financovanie, factoring)
+- ukáže tvoju **maržu**
 """
 )
 
 # ==========================
-# 0️⃣ Základná cenníková cena (história)
+# 0️⃣ Základná cenníková cena (Google Sheets)
 # ==========================
+
 st.header("0️⃣ Základná cenníková cena")
+
+cennik_error = None
+price_history = []
+
+try:
+    price_history = load_price_history()
+except Exception as e:
+    cennik_error = e
+    st.warning("Nepodarilo sa načítať cenníkovú históriu z Google Sheets. Skontroluj secrets.")
 
 col_p1, col_p2 = st.columns(2)
 
 with col_p1:
     price_date = st.date_input(
         "Dátum cenníkovej ceny",
-        value=datetime.date.today(),
-        help="Dátum, od ktorého platí táto cenníková cena."
+        value=datetime.date.today()
     )
 
 with col_p2:
@@ -50,50 +108,41 @@ with col_p2:
         value=1.500,
         step=0.001,
         format="%.4f",
-        help="Základná predajná cenníková cena bez zľavy."
     )
 
 if st.button("💾 Uložiť cenníkovú cenu"):
-    # ak existuje záznam pre tento dátum, prepíšeme; inak pridáme
-    found = False
-    for entry in st.session_state["price_history"]:
-        if entry["date"] == price_date:
-            entry["price"] = base_list_price_input
-            found = True
-            break
-    if not found:
-        st.session_state["price_history"].append(
-            {"date": price_date, "price": base_list_price_input}
-        )
-    st.success(f"Cenníková cena k {price_date.strftime('%d.%m.%Y')} bola uložená.")
+    if cennik_error:
+        st.error("Cenník nie je prepojený s Google Sheets – nedá sa uložiť.")
+    else:
+        save_price_entry(price_date, base_list_price_input)
+        st.success(f"Uložené k {price_date.strftime('%d.%m.%Y')}")
+        price_history = load_price_history()
 
-# zistíme aktuálnu cenníkovú cenu = posledná podľa dátumu
 current_list_price = None
-if st.session_state["price_history"]:
-    latest = max(st.session_state["price_history"], key=lambda x: x["date"])
+if price_history:
+    latest = max(price_history, key=lambda x: x["date"])
     current_list_price = latest["price"]
     st.info(
-        f"Aktuálna cenníková cena podľa posledného záznamu "
+        f"Aktuálna cenníková cena "
         f"({latest['date'].strftime('%d.%m.%Y')}): **{current_list_price:.4f} EUR/l**"
     )
 else:
-    st.warning("Zatiaľ nemáš uloženú žiadnu cenníkovú cenu. Použi blok vyššie.")
+    st.warning("Zatiaľ nemáš žiadnu cenu v Google Sheets.")
 
 with st.expander("História cenníkových cien"):
-    if st.session_state["price_history"]:
+    if price_history:
         st.table(
             [
                 {
                     "Dátum": entry["date"].strftime("%d.%m.%Y"),
                     "Cenníková cena (EUR/l)": f"{entry['price']:.4f}",
                 }
-                for entry in sorted(st.session_state["price_history"], key=lambda x: x["date"])
+                for entry in sorted(price_history, key=lambda x: x["date"])
             ]
         )
     else:
-        st.write("Zatiaľ žiadne záznamy.")
+        st.write("Žiadne záznamy.")
 
-st.markdown("---")
 
 # ==========================
 # 1️⃣ CRM – Klienti
@@ -118,35 +167,33 @@ with st.expander("Zoznam klientov"):
             ]
         )
     else:
-        st.info("Zatiaľ nemáš žiadnych klientov. Pridaj prvého nižšie.")
+        st.info("Zatiaľ nemáš klientov.")
 
 st.subheader("Pridať / upraviť klienta")
 
 col_c1, col_c2 = st.columns(2)
 
 with col_c1:
-    client_name_form = st.text_input("Názov klienta *", placeholder="Napr. RD TRANS s. r. o.")
-    contact_name = st.text_input("Kontaktná osoba", placeholder="Napr. p. Novák")
-    email = st.text_input("Email", placeholder="obchod@klient.sk")
-    phone = st.text_input("Telefón", placeholder="+421 900 000 000")
+    client_name_form = st.text_input("Názov klienta *")
+    contact_name = st.text_input("Kontaktná osoba")
+    email = st.text_input("Email")
+    phone = st.text_input("Telefón")
 
 with col_c2:
-    payment_days = st.number_input("Štandardná splatnosť (dni)", min_value=0, value=28, step=1)
+    payment_days = st.number_input("Splatnosť (dni)", min_value=0, value=28, step=1)
     default_logistics_eur = st.number_input(
-        "Štandardná logistika (EUR/l)",
+        "Logistika (EUR/l)",
         min_value=0.0,
         value=0.030,
         step=0.001,
-        format="%.4f",
-        help="Priemerný logistický náklad na tohto klienta."
+        format="%.4f"
     )
     default_discount_eur_m3 = st.number_input(
-        "Štandardná zľava z cenníkovej ceny (EUR/m³)",
+        "Zľava z cenníka (EUR/m³)",
         min_value=0.0,
         value=0.0,
         step=1.0,
-        format="%.2f",
-        help="Zľava v EUR na m³ oproti základnej cenníkovej cene."
+        format="%.2f"
     )
 
 if st.button("💾 Uložiť klienta"):
@@ -180,12 +227,13 @@ if st.button("💾 Uložiť klienta"):
                     "discount_eur_m3": default_discount_eur_m3,
                 }
             )
-        st.success(f"Klient '{client_name_form}' bol uložený.")
+        st.success(f"Klient '{client_name_form}' uložený.")
+
 
 st.markdown("---")
 
-# Výber klienta pre cenotvorbu
-st.subheader("Vyber klienta pre výpočet ceny")
+# Výber klienta
+st.subheader("Vyber klienta")
 
 client_names = ["(ručne bez CRM)"] + [c["name"] for c in st.session_state["clients"]]
 selected_client_name = st.selectbox("Klient", options=client_names)
@@ -198,39 +246,36 @@ if selected_client_name != "(ručne bez CRM)":
     )
 
 # ==========================
-# 2️⃣ Vstupné parametre ceny
+# 2️⃣ Vstupné parametre ceny a financovania
 # ==========================
 
-st.header("2️⃣ Vstupné parametre ceny a financovania")
+st.header("2️⃣ Nákup + logistika + financovanie")
 
 col1, col2 = st.columns(2)
 
 with col1:
     base_purchase_price = st.number_input(
-        "Nákupná cena nafty (EUR/l)",
+        "Nákupná cena (EUR/l)",
         min_value=0.0,
         value=1.20,
         step=0.001,
         format="%.4f",
-        help="Tvoja nákupná cena (napr. prepočítaná z Platts/cenníka na EUR/l).",
     )
 
     logistics = st.number_input(
-        "Logistické náklady (EUR/l)",
+        "Logistika (EUR/l)",
         min_value=0.0,
         value=(selected_client["logistics_eur"] if selected_client else 0.030),
         step=0.001,
         format="%.4f",
-        help="Doprava, skladovanie, prečerpávanie, poplatky…",
     )
 
 with col2:
     days_credit = st.number_input(
-        "Dni úverovania (napr. 28 pri 14+14)",
+        "Dni úverovania",
         min_value=0,
         value=(selected_client["payment_days"] if selected_client else 28),
         step=1,
-        help="Celkový počet dní od nákupu po inkaso od klienta.",
     )
 
     euribor_1m = st.number_input(
@@ -239,28 +284,31 @@ with col2:
         value=3.80,
         step=0.01,
         format="%.2f",
-        help="Aktuálna hodnota 1M EURIBOR v percentách.",
     )
 
     bank_margin = st.number_input(
-        "Marža banky nad EURIBOR (%)",
+        "Marža banky (%)",
         min_value=0.0,
         value=1.80,
         step=0.01,
         format="%.2f",
-        help="Tvoja marža banky – napr. EURIBOR + 1,8 %",
     )
 
     factoring_fee = st.number_input(
-        "Factoring fee z faktúry (%)",
+        "Factoring fee (%)",
         min_value=0.0,
         value=0.30,
         step=0.01,
         format="%.2f",
-        help="Poplatok za factoring ako % z fakturovanej sumy (napr. 0,3 %).",
     )
 
-# Vypočítame klientsku cenu podľa cenníka a zľavy
+
+# ==========================
+# 3️⃣ Cenníková a klientská cena
+# ==========================
+
+st.header("3️⃣ Cenníková a klientská cena")
+
 client_discount_eur_m3 = selected_client["discount_eur_m3"] if selected_client else 0.0
 client_discount_eur_l = client_discount_eur_m3 / 1000.0
 
@@ -268,26 +316,18 @@ client_price_per_l = None
 if current_list_price is not None:
     client_price_per_l = current_list_price - client_discount_eur_l
 
-st.markdown("---")
-st.subheader("3️⃣ Cenníková a klientská cena")
-
-if current_list_price is None:
-    st.error("Nemáš definovanú cenníkovú cenu. Najprv ju nastav v bloku 0️⃣.")
+if current_list_price:
+    st.write(f"**Cenníková cena:** {current_list_price:.4f} EUR/l")
 else:
-    st.write(f"**Základná cenníková cena:** {current_list_price:.4f} EUR/l")
-    if selected_client:
-        st.write(
-            f"**Zľava klienta {selected_client['name']}:** "
-            f"{client_discount_eur_m3:.2f} EUR/m³ "
-            f"(= {client_discount_eur_l:.4f} EUR/l)"
-        )
-        st.write(
-            f"➡️ **Klientská cena (po zľave): {client_price_per_l:.4f} EUR/l**"
-        )
-    else:
-        st.info(
-            "Nie je zvolený klient z CRM. Môžeš ho vybrať hore alebo pracovať len s cenníkovou cenou."
-        )
+    st.error("Nemáš uloženú cenníkovú cenu.")
+
+if selected_client:
+    st.write(f"**Zľava klienta:** {client_discount_eur_m3:.2f} EUR/m³ "
+            f"(= {client_discount_eur_l:.4f} EUR/l)")
+    st.write(f"➡️ **Klientská cena:** {client_price_per_l:.4f} EUR/l")
+else:
+    st.info("Vyber klienta z CRM.")
+
 
 # ==========================
 # 4️⃣ Údaje k ponuke
@@ -296,8 +336,8 @@ else:
 st.header("4️⃣ Údaje k ponuke")
 
 client_name_for_offer = st.text_input(
-    "Názov klienta v ponuke",
-    value=(selected_client["name"] if selected_client else ""),
+    "Klient v ponuke",
+    value=(selected_client["name"] if selected_client else "")
 )
 
 volume_l = st.number_input(
@@ -305,103 +345,76 @@ volume_l = st.number_input(
     min_value=0.0,
     value=30000.0,
     step=1000.0,
-    format="%.0f",
 )
 
 valid_until = st.date_input(
-    "Platnosť ponuky do",
-    value=datetime.date.today() + datetime.timedelta(days=3),
+    "Platnosť ponuky",
+    value=datetime.date.today() + datetime.timedelta(days=3)
 )
+
 
 # ==========================
 # 5️⃣ Výpočet ceny
 # ==========================
 
-st.header("5️⃣ Výpočet nákladu a marže")
+st.header("5️⃣ Výpočet nákladov a marže")
 
-if st.button("Vypočítať cenu a vytvoriť ponuku"):
+if st.button("Vypočítať"):
+
     if current_list_price is None or client_price_per_l is None:
-        st.error("Chýba cenníková cena alebo klientská cena. Skontroluj blok 0️⃣ a výber klienta.")
+        st.error("Chýba cenníková alebo klientská cena.")
     else:
-        # Základný náklad (nákup + logistika)
         base_cost = base_purchase_price + logistics
-
-        # Ročná úroková sadzba
         annual_rate = (euribor_1m + bank_margin) / 100.0
-
-        # Úrok za obdobie
         interest_l = base_cost * annual_rate * (days_credit / 365.0)
-
-        # Factoring fee – % z klientovej ceny
         factoring_l = client_price_per_l * (factoring_fee / 100.0)
-
-        # Celkový náklad
         total_cost = base_cost + interest_l + factoring_l
-
-        # Marža na liter
         margin_eur_per_l = client_price_per_l - total_cost
 
-        st.subheader("📊 Rozpis nákladov a marže (EUR/l)")
-        st.write(f"**Nákup + logistika:** {base_cost:.4f} EUR/l")
-        st.write(f"**Úrok za {days_credit} dní:** {interest_l:.4f} EUR/l")
-        st.write(f"**Factoring:** {factoring_l:.4f} EUR/l")
-        st.write(f"**Celkový náklad:** {total_cost:.4f} EUR/l")
-        st.write(f"**Klientská cena:** {client_price_per_l:.4f} EUR/l")
-        st.write(f"**Marža na litri:** {margin_eur_per_l:.4f} EUR/l")
+        st.subheader("📊 Náklady a marža (EUR/l)")
+        st.write(f"Nákup + logistika: {base_cost:.4f}")
+        st.write(f"Financovanie: {interest_l:.4f}")
+        st.write(f"Factoring: {factoring_l:.4f}")
+        st.write(f"Celkový náklad: {total_cost:.4f}")
+        st.write(f"Klientská cena: {client_price_per_l:.4f}")
+        st.write(f"Marža na liter: {margin_eur_per_l:.4f}")
 
-        if client_name_for_offer and volume_l > 0:
-            total_revenue = client_price_per_l * volume_l
-            total_cost_volume = total_cost * volume_l
-            total_margin_volume = margin_eur_per_l * volume_l
+        total_revenue = client_price_per_l * volume_l
+        total_margin_volume = margin_eur_per_l * volume_l
 
-            contact_line = ""
-            if selected_client:
-                if selected_client.get("contact_name"):
-                    contact_line += f"Kontaktná osoba: {selected_client['contact_name']}\n"
-                if selected_client.get("email"):
-                    contact_line += f"Email: {selected_client['email']}\n"
-                if selected_client.get("phone"):
-                    contact_line += f"Telefón: {selected_client['phone']}\n"
+        st.write("---")
+        st.write(f"**Celková tržba:** {total_revenue:,.2f} EUR")
+        st.write(f"**Celková marža:** {total_margin_volume:,.2f} EUR")
 
-            offer_text = f"""CENOVÁ PONUKA – motorová nafta
+        offer = f"""
+CENOVÁ PONUKA – motorová nafta
 
 Klient: {client_name_for_offer}
 Objem: {volume_l:,.0f} l
 
-Základná cenníková cena: {current_list_price:.4f} EUR/l
-Zľava klienta: {client_discount_eur_m3:.2f} EUR/m³ (= {client_discount_eur_l:.4f} EUR/l)
+Cenníková cena: {current_list_price:.4f} EUR/l
+Zľava: {client_discount_eur_m3:.2f} EUR/m³ (= {client_discount_eur_l:.4f} EUR/l)
 
-Jednotková klientská cena: {client_price_per_l:.4f} EUR/l
+Klientská cena: {client_price_per_l:.4f} EUR/l
 Celková hodnota dodávky: {total_revenue:,.2f} EUR
 
-Náklad dodávateľa:
-- nákup + logistika: {base_cost:.4f} EUR/l
-- financovanie ({days_credit} dní, EURIBOR 1M {euribor_1m:.2f} % + {bank_margin:.2f} %): {interest_l:.4f} EUR/l
-- factoring fee {factoring_fee:.2f} %: {factoring_l:.4f} EUR/l
-- celkový náklad: {total_cost:.4f} EUR/l
+Náklady:
+- nákup + logistika: {base_cost:.4f}
+- financovanie ({days_credit} dní): {interest_l:.4f}
+- factoring: {factoring_l:.4f}
 
-Odhadovaná marža dodávateľa:
-- marža na liter: {margin_eur_per_l:.4f} EUR/l
-- celková marža z objemu: {total_margin_volume:,.2f} EUR
+Celkový náklad: {total_cost:.4f}
+Marža: {margin_eur_per_l:.4f} EUR/l
+Celková marža: {total_margin_volume:,.2f} EUR
 
-{contact_line if contact_line else ""}Platnosť ponuky do: {valid_until.strftime('%d.%m.%Y')}
-
-V Bratislave, dňa {datetime.date.today().strftime('%d.%m.%Y')}
-
-Fuel Traders Corporation s. r. o.
+Platnosť ponuky do: {valid_until.strftime('%d.%m.%Y')}
 """
 
-            st.markdown("---")
-            st.subheader("📄 Text cenovej ponuky")
-            st.text_area("Ponuka", offer_text, height=320)
+        st.text_area("Ponuka", offer, height=300)
 
-            st.download_button(
-                "⬇️ Stiahnuť ponuku ako .txt",
-                data=offer_text,
-                file_name="cenova_ponuka_nafta.txt",
-                mime="text/plain",
-            )
-
-            st.info("Ak chceš PDF, otvor túto stránku v prehliadači → Print → Save as PDF.")
-        else:
-            st.warning("Vyplň názov klienta a objem dodávky, aby sa vytvoril text ponuky.")
+        st.download_button(
+            "Stiahnuť ponuku",
+            data=offer,
+            file_name="ponuka.txt",
+            mime="text/plain",
+        )
