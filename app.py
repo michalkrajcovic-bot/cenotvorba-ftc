@@ -41,7 +41,7 @@ def load_price_history():
             except Exception:
                 continue
         try:
-            price = float(raw_price)
+            price = float(str(raw_price).replace(",", "."))
         except Exception:
             continue
         history.append({"date": d, "price": price})
