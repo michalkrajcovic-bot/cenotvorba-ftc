@@ -30,7 +30,7 @@ def load_price_history():
     history = []
     for r in rows:
         raw_date = str(r.get("date", "")).strip()
-        raw_price = r.get("price". "")
+        raw_price = r.get("price", "")
         if not raw_date or raw_price == "":
             continue
         try:
