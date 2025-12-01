@@ -53,9 +53,9 @@ def save_price_entry(date, price):
     str_date = date.isoformat()
     try:
         cell = ws.find(str_date)
-        ws.update_cell(cell.row, 2, float(price))
+        ws.update_cell(cell.row, 2, float(str(price).replace(",", "."))
     except Exception:
-        ws.append_row([str_date, float(price)])
+        ws.append_row([str_date, float(str(price).replace(",", "."))])
 
 
 # Logo
