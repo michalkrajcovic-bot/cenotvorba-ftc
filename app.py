@@ -22,17 +22,38 @@ def get_cennik_worksheet():
         ws = sh.add_worksheet(title="cennik", rows=1000, cols=2)
         ws.update("A1:B1", [["date", "price"]])
     return ws
+def normalize_price(val):
+    """
+    Prevedie hodnotu ceny na float:
+    - nahradí čiarku za bodku
+    - ak je cena > 5, delí ju 10, kým nie je v rozumnom rozsahu
+      (očakávame 0–5 EUR/l, takže opravíme 19 → 1.9, 116399 → 1.16399)
+    """
+    try:
+        v = float(str(val).replace(",", "."))
+    except Exception:
+        return None
+
+    while v > 5:
+        v /= 10.0
+
+    return v
+
 
 def load_price_history():
     """Načíta históriu cenníkových cien z Google Sheets."""
     ws = get_cennik_worksheet()
     rows = ws.get_all_records()
     history = []
+
     for r in rows:
         raw_date = str(r.get("date", "")).strip()
         raw_price = r.get("price", "")
+
         if not raw_date or raw_price == "":
             continue
+
+        # dátum – najprv ISO (2025-12-03), potom dd.mm.yyyy
         try:
             d = datetime.date.fromisoformat(raw_date)
         except Exception:
@@ -40,23 +61,29 @@ def load_price_history():
                 d = datetime.datetime.strptime(raw_date, "%d.%m.%Y").date()
             except Exception:
                 continue
-        try:
-            price = float(str(raw_price).replace(",", "."))
-        except Exception:
+
+        price = normalize_price(raw_price)
+        if price is None:
             continue
+
         history.append({"date": d, "price": price})
+
     return history
+
 
 def save_price_entry(date, price):
     """Uloží/aktualizuje cenníkovú cenu k dátumu v Google Sheets."""
     ws = get_cennik_worksheet()
     str_date = date.isoformat()
+    norm_price = normalize_price(price)
+    if norm_price is None:
+        return
+
     try:
         cell = ws.find(str_date)
-        ws.update_cell(cell.row, 2, float(str(price).replace(",", ".")))
+        ws.update_cell(cell.row, 2, norm_price)
     except Exception:
-        ws.append_row([str_date, float(str(price).replace(",", "."))])
-
+        ws.append_row([str_date, norm_price])
 
 # Logo
 try:
